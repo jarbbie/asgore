@@ -3,52 +3,87 @@ use macroquad::{
     prelude::*,
 };
 
+/*
+* GameConfig ---------------------------------------
+*/
 struct GameConfig {
+    // Arena
     arena_half_width: f32,
     arena_half_height: f32,
     border_thickness: f32,
     wall_padding: f32,
+    // Player
     player_radius: f32,
     player_speed: f32,
     player_sprite_size: f32,
     max_player_hp: i32,
+    // Transition
     prompt_fade_seconds: f32,
     border_expand_seconds: f32,
-    hazard_phase_seconds: f32,
-    hazard_half_size: f32,
+    // Enemy
+    enemy_shot_interval_seconds: f32,
+    bullet_speed: f32,
+    bullet_radius: f32,
     opponent_size: Vec2,
     opponent_gap: f32,
+    enemy_max_hp: i32,
+    // Target
+    target_radius: f32,
+    target_visible_seconds: f32,
+    target_respawn_seconds: f32,
 }
 
 impl Default for GameConfig {
     fn default() -> Self {
         Self {
+            // Arena
             arena_half_width: 300.0,
             arena_half_height: 200.0,
             border_thickness: 10.0,
             wall_padding: 3.0,
+            // Player
             player_radius: 20.0,
-            // Preserves the old 8 px/frame movement at 60 FPS.
-            player_speed: 480.0,
+            player_speed: 300.0,
             player_sprite_size: 30.0,
             max_player_hp: 5,
+            // Transition
             prompt_fade_seconds: 0.7,
             border_expand_seconds: 1.2,
-            // The old timer switched phases every 100 frames at 60 FPS.
-            hazard_phase_seconds: 100.0 / 60.0,
-            hazard_half_size: 100.0,
+            // Enemy
+            enemy_shot_interval_seconds: 0.5,
+            bullet_speed: 220.0,
+            bullet_radius: 7.0,
             opponent_size: vec2(270.0, 195.0),
             opponent_gap: 50.0,
+            enemy_max_hp: 5,
+            target_radius: 15.0,
+            target_visible_seconds: 2.5,
+            target_respawn_seconds: 8.0,
         }
     }
 }
 
+impl GameConfig {
+    fn opponent_center_offset(&self) -> Vec2 {
+        vec2(
+            0.0,
+            -self.arena_half_height - self.opponent_gap - self.opponent_size.y / 2.0,
+        )
+    }
+}
+
+/*
+* Assets ---------------------------------------
+*/
 struct Assets {
     player: Texture2D,
     opponent: Texture2D,
     theme: Sound,
     savepoint: Sound,
     damage: Sound,
+    heal: Sound,
+    lose: Sound,
+    win: Sound,
     gameplay_music: Sound,
 }
 
@@ -70,6 +105,15 @@ impl Assets {
             damage: audio::load_sound("./assets/audio/damage_taken.wav")
                 .await
                 .expect("failed to load assets/audio/damage_taken.wav"),
+            heal: audio::load_sound("./assets/audio/undertale-heal.wav")
+                .await
+                .expect("failed to load assets/audio/undertale-heal.wav"),
+            lose: audio::load_sound("./assets/audio/undertale-death.wav")
+                .await
+                .expect("failed to load assets/audio/undertale-death.wav"),
+            win: audio::load_sound("./assets/audio/kids-yay.wav")
+                .await
+                .expect("failed to load assets/audio/kids-yay.wav"),
             gameplay_music: audio::load_sound("./assets/audio/driving-in-my-car.wav")
                 .await
                 .expect("failed to load assets/audio/driving-in-my-car.wav"),
@@ -77,6 +121,9 @@ impl Assets {
     }
 }
 
+/*
+* GameState ---------------------------------------
+*/
 #[derive(Clone, Copy)]
 enum GameState {
     Landing,
@@ -84,8 +131,12 @@ enum GameState {
     Starting,
     Run,
     GameOver,
+    Win,
 }
 
+/*
+* Player ---------------------------------------
+*/
 struct Player {
     position: Vec2,
     radius: f32,
@@ -140,61 +191,159 @@ impl Player {
         self.position.x = self.position.x.clamp(-safe_half_width, safe_half_width);
         self.position.y = self.position.y.clamp(-safe_half_height, safe_half_height);
     }
-
-    fn overlaps_hazard(&self, config: &GameConfig) -> bool {
-        let closest_x = self
-            .position
-            .x
-            .clamp(-config.hazard_half_size, config.hazard_half_size);
-        let closest_y = self
-            .position
-            .y
-            .clamp(-config.hazard_half_size, config.hazard_half_size);
-        let dx = self.position.x - closest_x;
-        let dy = self.position.y - closest_y;
-
-        dx * dx + dy * dy <= self.radius * self.radius
-    }
 }
 
-struct Hazard {
-    active: bool,
-    phase_elapsed: f32,
+/*
+* Enemy and Bullet ---------------------------------------
+*/
+struct Enemy {
+    max_hp: i32,
+    hp: i32,
+    shot_elapsed: f32,
 }
 
-impl Hazard {
-    fn new() -> Self {
+impl Enemy {
+    fn new(max_hp: i32) -> Self {
         Self {
-            active: false,
-            phase_elapsed: 0.0,
+            max_hp,
+            hp: max_hp,
+            shot_elapsed: 0.0,
         }
     }
 
     fn reset(&mut self) {
-        self.active = false;
-        self.phase_elapsed = 0.0;
+        self.shot_elapsed = 0.0;
+        self.hp = self.max_hp;
     }
 
-    // Returns true when the player takes damage at the end of an active phase.
-    fn update(&mut self, delta: f32, player: &Player, config: &GameConfig) -> bool {
-        self.phase_elapsed += delta;
-        if self.phase_elapsed < config.hazard_phase_seconds {
-            return false;
+    fn update(&mut self, delta: f32, target: Vec2, config: &GameConfig) -> Option<Bullet> {
+        self.shot_elapsed += delta;
+        if self.shot_elapsed < config.enemy_shot_interval_seconds {
+            return None;
         }
 
-        self.phase_elapsed = 0.0;
-        let takes_damage = self.active && player.overlaps_hazard(config);
-        self.active = !self.active;
-        takes_damage
+        self.shot_elapsed = 0.0;
+
+        // Player and Bullet use position relative to Arena's center
+        let spawn_position = config.opponent_center_offset();
+        let direction = (target - spawn_position).normalize_or_zero();
+
+        Some(Bullet {
+            position: spawn_position,
+            velocity: direction * config.bullet_speed,
+            radius: config.bullet_radius,
+        })
     }
 }
 
+struct Bullet {
+    position: Vec2,
+    velocity: Vec2,
+    radius: f32,
+}
+
+/*
+* Target ---------------------------------------
+*/
+#[derive(Clone, Copy)]
+enum TargetPhase {
+    Waiting { remaining: f32 },
+    Visible { remaining: f32 },
+}
+
+struct TargetArea {
+    position: Vec2,
+    phase: TargetPhase,
+}
+
+impl TargetArea {
+    fn new() -> Self {
+        Self {
+            position: Vec2::ZERO,
+            phase: TargetPhase::Waiting { remaining: 0.0 },
+        }
+    }
+
+    fn reset(&mut self) {
+        self.position = Vec2::ZERO;
+        // The first target appears as soon as the run begins.
+        self.phase = TargetPhase::Waiting { remaining: 0.0 };
+    }
+
+    fn is_visible(&self) -> bool {
+        matches!(self.phase, TargetPhase::Visible { .. })
+    }
+
+    // Returns true once when the player collects the visible target.
+    fn update(
+        &mut self,
+        delta: f32,
+        player_position: Vec2,
+        player_radius: f32,
+        config: &GameConfig,
+    ) -> bool {
+        match self.phase {
+            TargetPhase::Waiting { remaining } => {
+                let remaining = remaining - delta;
+                if remaining <= 0.0 {
+                    self.position = Self::random_position(config);
+                    self.phase = TargetPhase::Visible {
+                        remaining: config.target_visible_seconds,
+                    };
+                } else {
+                    self.phase = TargetPhase::Waiting { remaining };
+                }
+                false
+            }
+            TargetPhase::Visible { remaining } => {
+                let combined_radius = config.target_radius + player_radius;
+                let collected = self.position.distance_squared(player_position)
+                    <= combined_radius * combined_radius;
+                let remaining = remaining - delta;
+
+                if collected {
+                    self.phase = TargetPhase::Waiting {
+                        remaining: config.target_respawn_seconds,
+                    };
+                    true
+                } else if remaining <= 0.0 {
+                    self.phase = TargetPhase::Waiting {
+                        remaining: config.target_respawn_seconds,
+                    };
+                    false
+                } else {
+                    self.phase = TargetPhase::Visible { remaining };
+                    false
+                }
+            }
+        }
+    }
+
+    fn random_position(config: &GameConfig) -> Vec2 {
+        let margin = config.target_radius + config.border_thickness / 2.0 + config.wall_padding;
+        let min_x = -config.arena_half_width + margin;
+        let max_x = config.arena_half_width - margin;
+        let min_y = -config.arena_half_height + margin;
+        let max_y = config.arena_half_height - margin;
+
+        vec2(
+            macroquad::rand::gen_range(min_x, max_x),
+            macroquad::rand::gen_range(min_y, max_y),
+        )
+    }
+}
+
+/*
+* Game =================================
+*/
 pub struct Game {
     config: GameConfig,
     assets: Assets,
     state: GameState,
     player: Player,
-    hazard: Hazard,
+    enemy: Enemy,
+    bullets: Vec<Bullet>,
+    target_area: TargetArea,
     transition_elapsed: f32,
     current_arena_half_width: f32,
 }
@@ -203,6 +352,7 @@ impl Game {
     pub async fn new() -> Self {
         let config = GameConfig::default();
         let assets = Assets::load().await;
+        let enemy = Enemy::new(config.enemy_max_hp);
 
         audio::play_sound(
             &assets.theme,
@@ -217,7 +367,9 @@ impl Game {
             config,
             assets,
             state: GameState::Landing,
-            hazard: Hazard::new(),
+            enemy,
+            bullets: Vec::new(),
+            target_area: TargetArea::new(),
             transition_elapsed: 0.0,
             current_arena_half_width: 0.0,
         }
@@ -230,6 +382,7 @@ impl Game {
             GameState::Starting => self.update_starting(delta),
             GameState::Run => self.update_run(delta),
             GameState::GameOver => self.update_game_over(),
+            GameState::Win => self.update_win(),
         }
     }
 
@@ -246,22 +399,36 @@ impl Game {
             GameState::Starting => self.draw_arena(center, self.current_arena_half_width),
             GameState::Run => self.draw_run(center),
             GameState::GameOver => {
+                draw_text("DEFEATED", center.x - 145.0, center.y, 90.0, RED);
                 draw_text(
-                    "GameOver: press SPACE to replay",
-                    center.x - 340.0,
-                    center.y,
-                    50.0,
+                    "press SPACE to reset",
+                    center.x - 142.0,
+                    center.y + 40.0,
+                    36.0,
+                    WHITE,
+                );
+            }
+            GameState::Win => {
+                draw_text("YOU WIN!", center.x - 140.0, center.y, 90.0, GREEN);
+                draw_text(
+                    "Press SPACE to reset",
+                    center.x - 142.0,
+                    center.y + 40.0,
+                    36.0,
                     WHITE,
                 );
             }
         }
     }
 
+    // update -------------------------------
     fn update_landing(&mut self) {
         if is_key_pressed(KeyCode::Space) {
             audio::play_sound_once(&self.assets.savepoint);
             self.player.reset();
-            self.hazard.reset();
+            self.enemy.reset();
+            self.bullets.clear();
+            self.target_area.reset();
             self.transition_elapsed = 0.0;
             self.current_arena_half_width = 0.0;
             self.state = GameState::PromptFade;
@@ -270,8 +437,7 @@ impl Game {
 
     fn update_prompt_fade(&mut self, delta: f32) {
         self.transition_elapsed += delta;
-        let progress =
-            (self.transition_elapsed / self.config.prompt_fade_seconds).clamp(0.0, 1.0);
+        let progress = (self.transition_elapsed / self.config.prompt_fade_seconds).clamp(0.0, 1.0);
         audio::set_sound_volume(&self.assets.theme, 1.0 - progress);
 
         if progress >= 1.0 {
@@ -302,17 +468,74 @@ impl Game {
     }
 
     fn update_run(&mut self, delta: f32) {
-        if self.hazard.update(delta, &self.player, &self.config) {
-            self.player.hp -= 1;
+        self.player.update(&self.config, delta);
+
+        let target_collected = self.target_area.update(
+            delta,
+            self.player.position,
+            self.player.radius,
+            &self.config,
+        );
+        if target_collected {
+            audio::play_sound_once(&self.assets.heal);
+            self.enemy.hp = (self.enemy.hp - 1).max(0);
+        }
+
+        if self.enemy.hp <= 0 {
+            audio::stop_sound(&self.assets.gameplay_music);
+            audio::play_sound_once(&self.assets.win);
+            self.state = GameState::Win;
+            return;
+        }
+
+        let hit_count = self.update_bullets(delta);
+        if hit_count > 0 {
+            self.player.hp = (self.player.hp - hit_count).max(0);
             audio::play_sound_once(&self.assets.damage);
         }
 
-        self.player.update(&self.config, delta);
-
         if self.player.hp <= 0 {
             audio::stop_sound(&self.assets.gameplay_music);
+            audio::play_sound_once(&self.assets.lose);
             self.state = GameState::GameOver;
+            return;
         }
+
+        if let Some(bullet) = self.enemy.update(delta, self.player.position, &self.config) {
+            self.bullets.push(bullet);
+        }
+    }
+
+    fn update_bullets(&mut self, delta: f32) -> i32 {
+        let player_position = self.player.position;
+        let player_radius = self.player.radius;
+
+        let half_width = self.config.arena_half_width;
+        let half_height = self.config.arena_half_height;
+        let upper_limit = -half_height - self.config.opponent_gap - self.config.opponent_size.y;
+
+        let mut hit_count = 0;
+
+        self.bullets.retain_mut(|bullet| {
+            bullet.position += bullet.velocity * delta;
+
+            let combined_radius = bullet.radius + player_radius;
+            if bullet.position.distance_squared(player_position)
+                <= combined_radius * combined_radius
+            {
+                hit_count += 1;
+                return false;
+            }
+
+            let outside_bounds = bullet.position.x < -half_width - bullet.radius
+                || bullet.position.x > half_width + bullet.radius
+                || bullet.position.y < upper_limit - bullet.radius
+                || bullet.position.y > half_height + bullet.radius;
+
+            !outside_bounds
+        });
+
+        hit_count
     }
 
     fn update_game_over(&mut self) {
@@ -328,12 +551,33 @@ impl Game {
         }
     }
 
+    fn update_win(&mut self) {
+        if is_key_pressed(KeyCode::Space) {
+            audio::play_sound(
+                &self.assets.theme,
+                PlaySoundParams {
+                    looped: true,
+                    volume: 1.0,
+                },
+            );
+            self.state = GameState::Landing;
+        }
+    }
+
+    // draw -------------------------------
     fn draw_landing(&self, center: Vec2, alpha: f32) {
         draw_text(
-            "press SPACE to start",
-            center.x - 220.0,
+            "ASGORE",
+            center.x - 105.0,
             center.y,
-            50.0,
+            90.0,
+            Color::new(1.0, 0.0, 0.0, alpha),
+        );
+        draw_text(
+            "press SPACE to challenge",
+            center.x - 170.0,
+            center.y + 40.0,
+            36.0,
             Color::new(1.0, 1.0, 1.0, alpha),
         );
     }
@@ -350,32 +594,35 @@ impl Game {
     }
 
     fn draw_run(&self, center: Vec2) {
-        let opponent_top = center.y
-            - self.config.arena_half_height
-            - self.config.opponent_size.y
-            - self.config.opponent_gap;
+        let opponent_center = center + self.config.opponent_center_offset();
+        let opponent_size = self.config.opponent_size;
+
         draw_texture_ex(
             &self.assets.opponent,
-            center.x - self.config.opponent_size.x / 2.0,
-            opponent_top,
+            opponent_center.x - opponent_size.x / 2.0,
+            opponent_center.y - opponent_size.y / 2.0,
             WHITE,
             DrawTextureParams {
-                dest_size: Some(self.config.opponent_size),
+                dest_size: Some(opponent_size),
                 ..Default::default()
             },
         );
 
         self.draw_arena(center, self.config.arena_half_width);
 
-        if self.hazard.active {
-            let size = self.config.hazard_half_size * 2.0;
-            draw_rectangle(
-                center.x - self.config.hazard_half_size,
-                center.y - self.config.hazard_half_size,
-                size,
-                size,
-                YELLOW,
+        if self.target_area.is_visible() {
+            let target_screen_position = center + self.target_area.position;
+            draw_circle(
+                target_screen_position.x,
+                target_screen_position.y,
+                self.config.target_radius,
+                GREEN,
             );
+        }
+
+        for bullet in &self.bullets {
+            let screen_position = center + bullet.position;
+            draw_circle(screen_position.x, screen_position.y, bullet.radius, YELLOW);
         }
 
         let player_screen_position = center + self.player.position;
@@ -394,12 +641,21 @@ impl Game {
             },
         );
 
-        let health_text = format!("HP: {} / {}", self.player.hp, self.player.max_hp);
+        let health_text = format!("Player HP: {}/{}", self.player.hp, self.player.max_hp);
         draw_text(
             &health_text,
             center.x - self.config.arena_half_width + 30.0,
             center.y + self.config.arena_half_height + 50.0,
             50.0,
+            WHITE,
+        );
+
+        let enemy_health_text = format!("Asgore HP: {}/{}", self.enemy.hp, self.enemy.max_hp);
+        draw_text(
+            &enemy_health_text,
+            center.x - 90.0,
+            center.y - self.config.arena_half_height - 20.0,
+            28.0,
             WHITE,
         );
     }
