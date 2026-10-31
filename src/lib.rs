@@ -96,27 +96,27 @@ impl Assets {
             opponent: load_texture("./assets/image/asgore.png")
                 .await
                 .expect("failed to load assets/image/asgore.png"),
-            theme: audio::load_sound("./assets/audio/asgore_theme.wav")
+            theme: audio::load_sound("./assets/audio/asgore_theme.ogg")
                 .await
-                .expect("failed to load assets/audio/asgore_theme.wav"),
-            savepoint: audio::load_sound("./assets/audio/savepoint.wav")
+                .expect("failed to load assets/audio/asgore_theme.ogg"),
+            savepoint: audio::load_sound("./assets/audio/savepoint.ogg")
                 .await
-                .expect("failed to load assets/audio/savepoint.wav"),
-            damage: audio::load_sound("./assets/audio/damage_taken.wav")
+                .expect("failed to load assets/audio/savepoint.ogg"),
+            damage: audio::load_sound("./assets/audio/damage_taken.ogg")
                 .await
-                .expect("failed to load assets/audio/damage_taken.wav"),
-            heal: audio::load_sound("./assets/audio/undertale-heal.wav")
+                .expect("failed to load assets/audio/damage_taken.ogg"),
+            heal: audio::load_sound("./assets/audio/undertale-heal.ogg")
                 .await
-                .expect("failed to load assets/audio/undertale-heal.wav"),
-            lose: audio::load_sound("./assets/audio/undertale-death.wav")
+                .expect("failed to load assets/audio/undertale-heal.ogg"),
+            lose: audio::load_sound("./assets/audio/undertale-death.ogg")
                 .await
-                .expect("failed to load assets/audio/undertale-death.wav"),
-            win: audio::load_sound("./assets/audio/kids-yay.wav")
+                .expect("failed to load assets/audio/undertale-death.ogg"),
+            win: audio::load_sound("./assets/audio/kids-yay.ogg")
                 .await
-                .expect("failed to load assets/audio/kids-yay.wav"),
-            gameplay_music: audio::load_sound("./assets/audio/driving-in-my-car.wav")
+                .expect("failed to load assets/audio/kids-yay.ogg"),
+            gameplay_music: audio::load_sound("./assets/audio/driving-in-my-car.ogg")
                 .await
-                .expect("failed to load assets/audio/driving-in-my-car.wav"),
+                .expect("failed to load assets/audio/driving-in-my-car.ogg"),
         }
     }
 }
